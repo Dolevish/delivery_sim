@@ -1,3 +1,4 @@
+%% src/delivery_sim_sup.erl (מעודכן)
 -module(delivery_sim_sup).
 -behaviour(supervisor).
 
@@ -20,8 +21,10 @@ start_zone(ZoneId) ->
 
 init([]) ->
     %% *** השינוי כאן ***
-    %% הוספת ui_server כ-child הראשון של ה-supervisor הראשי.
-    %% הוא יופעל אוטומטית כשהאפליקציה עולה.
+    %% יצירת טבלאות ה-ETS הגלובליות לפני הפעלת ה-children.
+    ets:new(courier_locations, [set, public, named_table]), % טבלה למיקומי השליחים
+    ets:new(global_stats, [set, public, named_table]),      % טבלה לסטטיסטיקות גלובליות
+
     Children = [
         #{
             id => ui_server,
@@ -33,4 +36,3 @@ init([]) ->
 
     SupFlags = #{strategy => one_for_one, intensity => 1, period => 5},
     {ok, {SupFlags, Children}}.
-    

@@ -1,105 +1,142 @@
-%% courier_statem.erl
+%% src/courier_statem.erl
 -module(courier_statem).
 -behaviour(gen_statem).
 
-%% API
 -export([start_link/1, assign_order/2]).
-
-%% gen_statem callbacks
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([idle/3, going_to_pickup/3, delivering/3]). % פונקציה נפרדת לכל מצב
+-export([idle/3, going_to_pickup/3, delivering/3]).
 
 -include("globals.hrl").
 
-%% נגדיר זמני נסיעה קבועים לצורך הדוגמה (באלפיות השנייה)
--define(TRAVEL_TIME, 5000). % 5 שניות
+-define(TICK_INTERVAL_MS, 100). % עדכון מיקום כל 100 מילישניות
+-define(TRAVEL_TIME_SECONDS, 5). % זמן נסיעה בדוי בשניות
 
 %%%===================================================================
 %%% API Functions
 %%%===================================================================
-
-%% @doc מתחיל תהליך חדש של שליח
 start_link(CourierData) ->
     gen_statem:start_link({local, proplists:get_value(id, CourierData)}, ?MODULE, CourierData, []).
 
-%% @doc משייך הזמנה לשליח (אירוע חיצוני)
 assign_order(PidOrName, Order) ->
     gen_statem:cast(PidOrName, {assign_order, Order}).
-
 
 %%%===================================================================
 %%% gen_statem callbacks
 %%%===================================================================
-
 init(CourierData) ->
     ID = proplists:get_value(id, CourierData),
     Location = proplists:get_value(location, CourierData),
-    %% יצירת רשומה חדשה של שליח
     StateData = #courier{id = ID, location = Location},
-    %% המצב ההתחלתי של השליח הוא 'idle'
+    ets:insert(courier_locations, {ID, Location, idle}),
     {ok, idle, StateData}.
 
-%% @doc מגדיר את אופן הטיפול במצבים - פונקציה נפרדת לכל מצב
-callback_mode() ->
-    state_functions.
+callback_mode() -> state_functions.
 
-%% @doc פונקציית המצב 'idle' (השליח ממתין)
+%% @doc המצב שבו השליח ממתין להזמנה
 idle(cast, {assign_order, Order}, Data) ->
-    #order{id = OrderId, pickup_loc = PickupLoc} = Order,
+    #order{id = OrderId, pickup_loc = PickupLoc, dropoff_loc = DropoffLoc} = Order,
     CourierId = Data#courier.id,
-    io:format("Courier ~p received order ~p. Going to ~p~n", [CourierId, OrderId, PickupLoc]),
-    
-    %% שולח הודעה לתהליך ההזמנה שהוא שויך אליו
     order_server:assign(OrderId, CourierId),
-
-    %% *** התיקון כאן ***
-    %% מעבר למצב הבא, עם עדכון הנתונים, והפעלת טיימר.
-    %% הפעולה האחרונה היא רק המספר השלם של זמן ה-timeout.
-    {next_state, going_to_pickup, Data#courier{current_order_id = OrderId, location = PickupLoc},
-     ?TRAVEL_TIME};
+    
+    {ok, Timer} = timer:send_interval(?TICK_INTERVAL_MS, tick),
+    
+    RouteData = #{
+        start_loc => Data#courier.location,
+        end_loc => PickupLoc,
+        final_dest => DropoffLoc,
+        start_time => erlang:monotonic_time(millisecond),
+        timer => Timer
+    },
+    
+    NewData = Data#courier{route_data = RouteData, current_order_id = OrderId},
+    ets:insert(courier_locations, {CourierId, Data#courier.location, going_to_pickup}),
+    {next_state, going_to_pickup, NewData};
 idle(_EventType, _EventContent, Data) ->
     {keep_state, Data}.
 
-
-%% @doc פונקציית המצב 'going_to_pickup' (בדרך לאיסוף)
-going_to_pickup(timeout, _EventContent, Data) ->
-    OrderId = Data#courier.current_order_id,
-    CourierId = Data#courier.id,
-    io:format("Courier ~p arrived at pickup location for order ~p.~n", [CourierId, OrderId]),
-
-    %% מודיע לתהליך ההזמנה שהחבילה נאספה
-    order_server:pickup(OrderId),
-
-    %% *** התיקון כאן ***
-    %% מעבר למצב הבא (משלוח), והפעלת טיימר.
-    {next_state, delivering, Data, ?TRAVEL_TIME};
+%% @doc המצב שבו השליח בדרך לאיסוף
+going_to_pickup(info, tick, Data) ->
+    update_location(going_to_pickup, Data);
 going_to_pickup(_EventType, _EventContent, Data) ->
     {keep_state, Data}.
 
-
-%% @doc פונקציית המצב 'delivering' (בדרך ללקוח)
-delivering(timeout, _EventContent, Data) ->
-    OrderId = Data#courier.current_order_id,
-    CourierId = Data#courier.id,
-    io:format("Courier ~p delivered order ~p! Returning to base.~n", [CourierId, OrderId]),
-    
-    %% מודיע לתהליך ההזמנה שהמשלוח הושלם
-    order_server:complete(OrderId),
-
-    %% עדכון הסטטיסטיקות של השליח
-    NewStats = maps:update_with(completed, fun(V) -> V + 1 end, 1, Data#courier.stats),
-    Packages = [OrderId | (maps:get(packages, Data#courier.stats, []))],
-    FinalStats = maps:put(packages, Packages, NewStats),
-
-    %% חזרה למצב ההתחלתי, עם נתונים מעודכנים (ללא timeout חדש)
-    {next_state, idle, Data#courier{current_order_id = none, stats = FinalStats}};
+%% @doc המצב שבו השליח בדרך ללקוח
+delivering(info, tick, Data) ->
+    update_location(delivering, Data);
 delivering(_EventType, _EventContent, Data) ->
     {keep_state, Data}.
 
-%% @hidden
-terminate(_Reason, _State, _Data) ->
+terminate(_Reason, _State, Data) ->
+    ets:delete(courier_locations, Data#courier.id),
     ok.
 
-%% @hidden
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
+
+%%%===================================================================
+%%% Internal Helper Functions
+%%%===================================================================
+
+%% @private חישוב מיקום חדש וטיפול בהגעה
+update_location(Status, Data) ->
+    RouteData = Data#courier.route_data,
+    #{start_loc := {X1, Y1}, end_loc := {X2, Y2}, start_time := StartTime, timer := Timer} = RouteData,
+    CourierId = Data#courier.id,
+    
+    Now = erlang:monotonic_time(millisecond),
+    ElapsedTime = Now - StartTime,
+    TravelDuration = ?TRAVEL_TIME_SECONDS * 1000,
+    
+    if ElapsedTime >= TravelDuration ->
+        timer:cancel(Timer),
+        ets:insert(courier_locations, {CourierId, {X2, Y2}, arrived}),
+        handle_arrival(Status, Data);
+    true ->
+        Ratio = ElapsedTime / TravelDuration,
+        NewX = X1 + round((X2 - X1) * Ratio),
+        NewY = Y1 + round((Y2 - Y1) * Ratio),
+        NewLocation = {NewX, NewY},
+        ets:insert(courier_locations, {CourierId, NewLocation, Status}),
+        {keep_state, Data#courier{location = NewLocation}}
+    end.
+
+%% @private טיפול בלוגיקה לאחר הגעה ליעד
+handle_arrival(going_to_pickup, Data) ->
+    CourierId = Data#courier.id,
+    OrderId = Data#courier.current_order_id,
+    RouteData = Data#courier.route_data,
+    
+    order_server:pickup(OrderId),
+    
+    {ok, NewTimer} = timer:send_interval(?TICK_INTERVAL_MS, tick),
+    NewRouteData = RouteData#{
+        start_loc => maps:get(end_loc, RouteData),
+        end_loc => maps:get(final_dest, RouteData),
+        start_time => erlang:monotonic_time(millisecond),
+        timer => NewTimer
+    },
+    
+    ets:insert(courier_locations, {CourierId, maps:get(end_loc, RouteData), delivering}),
+    {next_state, delivering, Data#courier{route_data = NewRouteData}};
+
+handle_arrival(delivering, Data) ->
+    CourierId = Data#courier.id,
+    OrderId = Data#courier.current_order_id,
+    RouteData = Data#courier.route_data,
+
+    order_server:complete(OrderId),
+
+    NewStats = maps:update_with(completed, fun(V) -> V + 1 end, 1, Data#courier.stats),
+    Packages = [OrderId | (maps:get(packages, Data#courier.stats, []))],
+    FinalStats = maps:put(packages, Packages, NewStats),
+    
+    FinalLocation = maps:get(end_loc, RouteData),
+    ets:insert(courier_locations, {CourierId, FinalLocation, idle}),
+    
+    NewData = Data#courier{
+        current_order_id = none,
+        stats = FinalStats,
+        route_data = #{}, % איפוס נתוני המסלול
+        location = FinalLocation
+    },
+    {next_state, idle, NewData}.
