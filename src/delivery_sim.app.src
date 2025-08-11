@@ -6,7 +6,8 @@
   {mod, {delivery_sim_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    wx % <--- הוספת אפליקציית wx
    ]},
   {env,[]},
   {modules, [
@@ -14,8 +15,9 @@
       delivery_sim_sup,
       courier_statem,
       order_server,
-      zone_sup,             % <--- הוספה
-      zone_manager_server   % <--- הוספה
+      zone_sup,
+      zone_manager_server,
+      ui_server % <--- הוספת המודול החדש
   ]},
 
   {licenses, ["Apache-2.0"]},
