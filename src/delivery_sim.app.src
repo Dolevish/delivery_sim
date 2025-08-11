@@ -1,14 +1,23 @@
-{application, delivery_sim, [
-    {description, "An OTP application"},
-    {vsn, "0.1.0"},
-    {registered, []},
-    {mod, {delivery_sim_app, []}},
-    {applications, [
-        kernel,
-        stdlib
-    ]},
-    {env, []},
-    {modules, []},
-    {licenses, ["Apache-2.0"]},
-    {links, []}
+{application, delivery_sim,
+ [
+  {description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {delivery_sim_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, [
+      delivery_sim_app,
+      delivery_sim_sup,
+      courier_statem,
+      order_server,
+      zone_sup,             % <--- הוספה
+      zone_manager_server   % <--- הוספה
+  ]},
+
+  {licenses, ["Apache-2.0"]},
+  {links, []}
  ]}.
